@@ -51,6 +51,22 @@ async function initializeDatabase() {
     )
   `;
 
+  const createNotesTable = `
+  CREATE TABLE IF NOT EXISTS notes (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    local_id VARCHAR(100) NOT NULL,          -- 客户端生成的唯一ID
+    title TEXT,
+    content LONGTEXT,
+    version INT NOT NULL DEFAULT 1,          -- 乐观锁版本号
+    deleted TINYINT(1) NOT NULL DEFAULT 0,   -- 软删除标记
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_user_local (user_id, local_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  )
+`;
+
   const connection = await pool.getConnection();
   try {
     await connection.execute(createUsersTable);

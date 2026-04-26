@@ -96,6 +96,100 @@ app.post('/api/sync', authenticateToken, async (req, res) => {
   }
 });
 
+// 新增同步拉取
+app.post('/api/sync/pull', authenticateToken, async (req, res) => {
+  const { clients } = req.body || {};
+  const pool = getPool();
+  const updates = [];
+
+  if (!clients) return res.status(400).json({ error: 'clients required' });
+
+  const entries = Object.entries(clients);
+  for (const [localId, clientVersion] of entries) {
+    const [rows] = await pool.execute(
+      'SELECT * FROM notes WHERE user_id = ? AND local_id = ?',
+      [req.user.id, localId]
+    );
+    if (rows.length > 0) {
+      const serverNote = rows[0];
+      if (serverNote.version > clientVersion) {
+        updates.push({
+          local_id: serverNote.local_id,
+          title: serverNote.title,
+          content: serverNote.content,
+          version: serverNote.version,
+          deleted: serverNote.deleted === 1,
+          updated_at: serverNote.updated_at
+        });
+      }
+    } else {
+      // 客户端有但服务器没有，视为新建（或已删除），强制客户端删除本地
+      updates.push({ local_id: localId, deleted: true, version: 0 });
+    }
+  }
+
+  // 另外，服务器上新出现的 local_id（客户端还没有的）也需返回
+  // 可通过客户端提供一个 known_ids 数组来实现，此处略
+  res.json({ updates, current_time: new Date().toISOString() });
+});
+
+// 新增同步推送
+app.post('/api/sync/push', authenticateToken, async (req, res) => {
+  const { changes } = req.body || [];
+  if (!Array.isArray(changes)) return res.status(400).json({ error: 'changes required' });
+
+  const pool = getPool();
+  const results = [];
+
+  for (const change of changes) {
+    const { local_id, title, content, version, deleted, base_version } = change;
+    const [existing] = await pool.execute(
+      'SELECT * FROM notes WHERE user_id = ? AND local_id = ?',
+      [req.user.id, local_id]
+    );
+
+    if (existing.length === 0) {
+      // 新笔记
+      await pool.execute(
+        'INSERT INTO notes (user_id, local_id, title, content, version, deleted) VALUES (?, ?, ?, ?, ?, ?)',
+        [req.user.id, local_id, title, content, 1, deleted ? 1 : 0]
+      );
+      results.push({ local_id, status: 'created', version: 1 });
+    } else {
+      const serverNote = existing[0];
+      if (base_version === undefined || base_version === serverNote.version) {
+        // 无冲突，直接更新
+        const newVersion = serverNote.version + 1;
+        await pool.execute(
+          'UPDATE notes SET title = ?, content = ?, version = ?, deleted = ? WHERE id = ?',
+          [title, content, newVersion, deleted ? 1 : 0, serverNote.id]
+        );
+        results.push({ local_id, status: 'updated', version: newVersion });
+
+        // 广播给其他设备
+        io.to(`user_${req.user.id}`).emit('note_updated', {
+          local_id,
+          title,
+          content,
+          version: newVersion,
+          deleted: deleted,
+          updated_at: new Date().toISOString()
+        });
+      } else {
+        // 冲突：返回服务器最新版本，让客户端处理
+        results.push({
+          local_id,
+          status: 'conflict',
+          server_version: serverNote.version,
+          server_note: { title: serverNote.title, content: serverNote.content, deleted: serverNote.deleted === 1 }
+        });
+      }
+    }
+  }
+
+  res.json({ results });
+});
+
 // ------------------ 启动服务器 ------------------
 async function start() {
   try {
