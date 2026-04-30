@@ -130,6 +130,64 @@ app.post('/api/sync/pull', authenticateToken, async (req, res) => {
   res.json({ updates, current_time: new Date().toISOString() });
 });
 
+
+// ---------- 笔记同步：推送变更 ----------
+app.post('/api/sync/push', authenticateToken, async (req, res) => {
+  const { changes } = req.body || [];
+  if (!Array.isArray(changes)) return res.status(400).json({ error: 'changes required' });
+  const pool = getPool();
+  const results = [];
+
+  for (const change of changes) {
+    const { local_id, title, content, version, deleted, base_version } = change;
+    const count = change.count ?? 0;
+    const priority = change.priority || 'medium';
+    const icon = change.icon || '';
+
+    const [existing] = await pool.execute(
+      'SELECT * FROM notes WHERE user_id = ? AND local_id = ?',
+      [req.user.id, local_id]
+    );
+
+    if (existing.length === 0) {
+      await pool.execute(
+        `INSERT INTO notes (user_id, local_id, title, content, version, deleted, count, priority, icon)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [req.user.id, local_id, title, content, 1, deleted ? 1 : 0, count, priority, icon]
+      );
+      results.push({ local_id, status: 'created', version: 1 });
+    } else {
+      const serverNote = existing[0];
+      if (base_version === undefined || base_version === serverNote.version) {
+        const newVersion = serverNote.version + 1;
+        await pool.execute(
+          `UPDATE notes SET title=?, content=?, version=?, deleted=?, count=?, priority=?, icon=?
+           WHERE id=?`,
+          [title, content, newVersion, deleted ? 1 : 0, count, priority, icon, serverNote.id]
+        );
+        results.push({ local_id, status: 'updated', version: newVersion });
+      } else {
+        // 冲突：返回服务器端最新版本
+        results.push({
+          local_id,
+          status: 'conflict',
+          server_version: serverNote.version,
+          server_note: {
+            title: serverNote.title,
+            content: serverNote.content,
+            deleted: serverNote.deleted === 1,
+            count: serverNote.count,
+            priority: serverNote.priority,
+            icon: serverNote.icon
+          }
+        });
+      }
+    }
+  }
+
+  res.json({ results });
+});\
+
 // ---------- 启动 ----------
 async function start() {
   try {
