@@ -186,7 +186,7 @@ app.post('/api/sync/push', authenticateToken, async (req, res) => {
   }
 
   res.json({ results });
-});\
+});
 
 // ---------- 启动 ----------
 async function start() {
